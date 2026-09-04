@@ -1,43 +1,107 @@
-# NetWatch Android thin client
+# NetWatch Android
 
-This app is a LAN remote for a paired NetWatch PC. It has no torrent engine, provider credentials, VPN stack, arbitrary URL opener, download mode, or offline library.
+NetWatch Android is a companion app for a paired NetWatch PC on the same local network.
 
-NetWatch for Windows 1.0.9 or newer is required. The PC remains the security boundary and owns discovery, torrent resolution, streaming, and optional subtitle-provider access. The desktop repository owns the authoritative [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md) contract.
+The phone handles browsing and playback. The PC still handles discovery, torrent streaming, VPN routing, and subtitle providers.
+
+The Android app does **not** include:
+
+* a torrent engine
+* provider API keys
+* a VPN
+* downloads or offline storage
+* arbitrary URL access
+
+NetWatch for Windows **1.0.9 or newer** is required.
+
+The desktop app defines the protocol used between both devices: [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
 
 ## Build
 
-Use JDK 17 and an Android SDK containing API 37 and Build Tools 36.0.0. The checked-in Gradle wrapper uses Gradle 9.3.1. The app is pinned to AGP 9.1.1, Compose BOM 2026.08.00, Media3 1.11.0, and CameraX 1.6.2.
+Requirements:
+
+* JDK 17
+* Android SDK with API 37
+* Android Build Tools 36.0.0
+
+The project uses:
+
+* Gradle 9.3.1
+* Android Gradle Plugin 9.1.1
+* Compose BOM 2026.08.00
+* Media3 1.11.0
+* CameraX 1.6.2
 
 ```powershell
 $env:JAVA_HOME = "C:\path\to\jdk-17"
 $env:ANDROID_HOME = "C:\path\to\android-sdk"
+
 .\gradlew.bat testDebugUnitTest assembleDebug
 ```
 
-The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+The debug APK is created at:
 
-## Pair and use
+```text
+app/build/outputs/apk/debug/app-debug.apk
+```
 
-1. Start NetWatch on the PC and wait for its protected runtime to become ready.
-2. Open Settings, choose the active private IPv4 interface, and enable Remote access.
-3. Select **Pair new device**. The QR is valid for five minutes and one successful claim.
-4. On Android, select **Scan pairing QR** and grant the camera permission after reading its disclosure.
-5. Browse Home, Discover, or Search, select a title and release, and play it. TV episodes are listed for the selected season and remain visible while their streams load.
-6. Use **Unpair this device** on Android or revoke the individual device from PC Settings when access is no longer needed.
+## Pairing
 
-The app uses the same compact Discover selectors and Iconoir navigation geometry as the PC application. The player uses the NetWatch control layout and the same Iconoir vector geometry as the PC player. Preparation and rebuffering are exclusive artwork-backdrop states; regular playback controls remain hidden until video renders. The resize control cycles **Fill**, **Fit**, **Original**, and **16:9**. Fill covers the viewport, while Fit constrains the video by height.
+1. Start NetWatch on the PC and wait for it to become ready.
+2. Open **Settings → Remote access**.
+3. Choose the local network interface and enable remote access.
+4. Select **Pair new device**.
+5. On Android, select **Scan pairing QR** and allow camera access.
+6. Scan the QR shown on the PC.
 
-The compact **Tracks** menu manages embedded and externally retrieved subtitles. Subtitle size, background, and contrast are configurable and stored only on the Android device.
+The pairing QR expires after five minutes and can only be used once.
 
-Both devices must remain on the selected private LAN. Guest Wi-Fi/client isolation may prevent connection. A changed PC address requires a new QR. A regenerated PC identity or revoked credential always requires re-pairing.
+Once paired, you can browse Home, Discover, and Search, choose a release, and start playback from the phone.
 
-## Permissions and privacy
+To remove access, use **Unpair this device** on Android or revoke the device from NetWatch Settings on the PC.
 
-- `INTERNET`: communicates only with the pinned gateway origin selected by the QR.
-- `CAMERA`: scans the pairing QR locally; frames are not retained or transmitted.
+## Playback
 
-Backups are disabled. The paired profile is encrypted with Android Keystore, and credentials are never placed in a URL or application log.
+The Android player follows the same general layout as the Windows player.
 
-## Releases
+It includes:
 
-Release APKs belong in GitHub Releases with a SHA-256 checksum. APKs, signing keys, local SDK paths, and generated build directories must not be committed to this repository.
+* playback controls
+* subtitle and audio track selection
+* online subtitle support through the PC
+* subtitle size, background, and contrast settings
+* Fill, Fit, Original, and 16:9 resize modes
+
+Subtitle appearance settings are stored only on the Android device.
+
+During startup or rebuffering, the player shows the title artwork instead of normal playback controls. Controls appear once video is ready.
+
+For TV shows, episodes remain visible while their streams are being prepared.
+
+## Network requirements
+
+The phone and PC must be on the same private local network.
+
+Connections may fail when:
+
+* the devices are on different networks
+* guest Wi-Fi isolates devices from each other
+* router client isolation is enabled
+* the PC's local IP address changes
+
+If the PC address changes, generate a new pairing QR.
+
+Re-pairing is also required if the PC identity is regenerated or the Android device's credential is revoked.
+
+## Privacy
+
+The app requests only:
+
+* **Internet** — connects to the paired NetWatch PC
+* **Camera** — scans the pairing QR locally
+
+QR camera frames are not saved or uploaded.
+
+Pairing information is encrypted using Android Keystore. Credentials are never placed in URLs or application logs.
+
+Android backups are disabled for the app.
