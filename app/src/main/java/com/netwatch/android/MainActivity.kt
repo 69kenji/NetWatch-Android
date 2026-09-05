@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -62,7 +63,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -517,26 +517,107 @@ private fun QrScanner(modifier: Modifier, onQr: (String) -> Unit, onCancel: () -
         }; return
     }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    val executor = remember { Executors.newSingleThreadExecutor() }
-    val scanner = remember { BarcodeScanning.getClient(BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build()) }
-    val delivered = remember { AtomicBoolean(false) }
-    val analyzing = remember { AtomicBoolean(false) }
-    val previewView = remember { PreviewView(context).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
-    AndroidView(factory = { previewView }, modifier = modifier)
-    LaunchedEffect(Unit) {
-        val provider = ProcessCameraProvider.getInstance(context).get()
-        val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
-        val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
-        analysis.setAnalyzer(executor) { imageProxy ->
-            val image = imageProxy.image
-            if (image == null || !analyzing.compareAndSet(false, true)) imageProxy.close()
-            else scanner.process(InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees))
-                .addOnSuccessListener { barcodes -> barcodes.firstNotNullOfOrNull { it.rawValue }?.let { if (delivered.compareAndSet(false, true)) onQr(it) } }
-                .addOnCompleteListener { analyzing.set(false); imageProxy.close() }
+    var retryKey by remember { mutableStateOf(0) }
+    var cameraError by remember(retryKey) { mutableStateOf<String?>(null) }
+    val previewView = remember(retryKey) {
+        PreviewView(context).apply {
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
-        provider.unbindAll(); provider.bindToLifecycle(lifecycleOwner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
     }
-    DisposableEffect(Unit) { onDispose { runCatching { ProcessCameraProvider.getInstance(context).get().unbindAll() }; scanner.close(); executor.shutdownNow() } }
+    Box(modifier) {
+        AndroidView(factory = { previewView }, modifier = Modifier.fillMaxSize())
+        cameraError?.let {
+            Column(
+                Modifier.fillMaxSize().background(PanelRaised).padding(20.dp),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text("Camera unavailable", color = TextPrimary, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(6.dp))
+                Text("Check camera access and try again.", color = TextSecondary, fontSize = 10.sp)
+                Spacer(Modifier.height(14.dp))
+                Button(onClick = { retryKey += 1 }) { Text("Retry") }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+        }
+    }
+    DisposableEffect(lifecycleOwner, previewView, retryKey) {
+        val executor = Executors.newSingleThreadExecutor()
+        val delivered = AtomicBoolean(false)
+        val analyzing = AtomicBoolean(false)
+        val disposed = AtomicBoolean(false)
+        var provider: ProcessCameraProvider? = null
+        var scanner = runCatching {
+            BarcodeScanning.getClient(BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build())
+        }.onFailure { error ->
+            Log.e("NetWatchCamera", "Unable to initialize barcode scanning", error)
+            cameraError = "Camera unavailable"
+        }.getOrNull()
+
+        runCatching { ProcessCameraProvider.getInstance(context) }
+            .onSuccess { providerFuture ->
+                providerFuture.addListener({
+                    if (disposed.get()) return@addListener
+                    runCatching {
+                        val resolvedProvider = providerFuture.get()
+                        val selector = when {
+                            resolvedProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA) -> CameraSelector.DEFAULT_BACK_CAMERA
+                            resolvedProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA) -> CameraSelector.DEFAULT_FRONT_CAMERA
+                            else -> throw IllegalStateException("No camera is available")
+                        }
+                        val barcodeScanner = scanner ?: throw IllegalStateException("Barcode scanner is unavailable")
+                        val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
+                        val analysis = ImageAnalysis.Builder()
+                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                            .build()
+                        analysis.setAnalyzer(executor) { imageProxy ->
+                            val image = imageProxy.image
+                            if (image == null || delivered.get() || !analyzing.compareAndSet(false, true)) {
+                                imageProxy.close()
+                                return@setAnalyzer
+                            }
+                            runCatching {
+                                barcodeScanner.process(InputImage.fromMediaImage(image, imageProxy.imageInfo.rotationDegrees))
+                                    .addOnSuccessListener { barcodes ->
+                                        barcodes.firstNotNullOfOrNull { it.rawValue }?.let { value ->
+                                            if (delivered.compareAndSet(false, true)) onQr(value)
+                                        }
+                                    }
+                                    .addOnFailureListener { error -> Log.w("NetWatchCamera", "Unable to read camera frame", error) }
+                                    .addOnCompleteListener {
+                                        analyzing.set(false)
+                                        imageProxy.close()
+                                    }
+                            }.onFailure { error ->
+                                analyzing.set(false)
+                                imageProxy.close()
+                                Log.w("NetWatchCamera", "Unable to submit camera frame", error)
+                            }
+                        }
+                        resolvedProvider.unbindAll()
+                        resolvedProvider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                        provider = resolvedProvider
+                        cameraError = null
+                    }.onFailure { error ->
+                        Log.e("NetWatchCamera", "Unable to start QR camera", error)
+                        cameraError = "Camera unavailable"
+                    }
+                }, ContextCompat.getMainExecutor(context))
+            }
+            .onFailure { error ->
+                Log.e("NetWatchCamera", "Unable to create camera provider", error)
+                cameraError = "Camera unavailable"
+            }
+
+        onDispose {
+            disposed.set(true)
+            runCatching { provider?.unbindAll() }
+            scanner?.close()
+            scanner = null
+            executor.shutdownNow()
+        }
+    }
 }
 
 private fun String.label() = when (this) { "movies" -> "Movies"; "tv" -> "TV"; "anime" -> "Anime"; else -> replaceFirstChar(Char::uppercase) }
