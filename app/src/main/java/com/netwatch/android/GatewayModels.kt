@@ -11,8 +11,6 @@ data class PairingPayload(
     val serverSpkiSha256: String,
     val expiresAt: String,
 ) {
-    fun baseUrl(): String = "https://$host:$port"
-
     companion object {
         fun parse(raw: String): PairingPayload {
             require(raw.length in 80..2048) { "QR payload has an invalid size" }
@@ -56,8 +54,6 @@ data class GatewayProfile(
     val deviceId: String,
     val credential: String,
 ) {
-    val baseUrl: String get() = "https://$host:$port"
-
     fun toJson(): JSONObject = JSONObject()
         .put("host", host)
         .put("port", port)
@@ -168,7 +164,37 @@ data class StreamOption(
     }
 }
 
-data class PlaybackSession(val id: String, val state: String)
+data class PlaybackSession(
+    val id: String,
+    val resumePositionMs: Long = 0L,
+    val title: String? = null,
+    val backdropPath: String? = null,
+)
+
+data class KeepWatchingItem(
+    val item: CatalogItem,
+    val season: Int?,
+    val episode: Int?,
+    val positionSeconds: Double,
+    val durationSeconds: Double,
+    val updatedAt: String,
+) {
+    val progress: Float get() = if (durationSeconds > 0) (positionSeconds / durationSeconds).coerceIn(0.0, 1.0).toFloat() else 0f
+
+    companion object {
+        fun fromJson(json: JSONObject): KeepWatchingItem? {
+            val item = CatalogItem.fromJson(json) ?: return null
+            val position = json.optDouble("position_seconds", Double.NaN)
+            val duration = json.optDouble("duration_seconds", Double.NaN)
+            val updatedAt = json.optString("updated_at")
+            if (!position.isFinite() || position < 0 || !duration.isFinite() || duration <= 0 || duration > 604_800.0 || runCatching { Instant.parse(updatedAt) }.isFailure) return null
+            val season = json.optInt("season", -1).takeIf { it in 0..9999 }
+            val episode = json.optInt("episode", -1).takeIf { it in 0..9999 }
+            if (item.isSeries && (season == null || episode == null)) return null
+            return KeepWatchingItem(item, season, episode, position.coerceAtMost(duration), duration, updatedAt)
+        }
+    }
+}
 
 data class SeasonChoice(val number: Int, val name: String, val episodeCount: Int)
 
@@ -180,3 +206,23 @@ data class EpisodeChoice(
     val runtime: Int?,
     val rating: Double,
 )
+
+internal const val EPISODE_RANGE_SIZE = 50
+
+data class EpisodeRange(val index: Int, val firstEpisode: Int, val lastEpisode: Int) {
+    val label: String get() = "$firstEpisode–$lastEpisode"
+}
+
+internal fun episodeRanges(episodes: List<EpisodeChoice>): List<EpisodeRange> = episodes
+    .sortedBy { it.number }
+    .chunked(EPISODE_RANGE_SIZE)
+    .mapIndexedNotNull { index, chunk ->
+        val first = chunk.firstOrNull()?.number ?: return@mapIndexedNotNull null
+        EpisodeRange(index, first, chunk.last().number)
+    }
+
+internal fun episodesInRange(episodes: List<EpisodeChoice>, rangeIndex: Int): List<EpisodeChoice> = episodes
+    .sortedBy { it.number }
+    .chunked(EPISODE_RANGE_SIZE)
+    .getOrNull(rangeIndex.coerceAtLeast(0))
+    .orEmpty()

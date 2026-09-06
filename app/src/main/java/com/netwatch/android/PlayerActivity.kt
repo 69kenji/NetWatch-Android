@@ -3,6 +3,7 @@
 package com.netwatch.android
 
 import android.os.Bundle
+import android.util.Log
 import android.util.TypedValue
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -38,7 +39,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -65,6 +65,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -90,12 +91,14 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
+import java.util.concurrent.TimeUnit
 
 private enum class VideoSizeMode(val label: String, val resizeMode: Int) {
     FILL("Fill", AspectRatioFrameLayout.RESIZE_MODE_FILL),
@@ -152,6 +155,9 @@ class PlayerActivity : ComponentActivity() {
     private var subtitleFeedback by mutableStateOf<String?>(null)
     private var mediaItem: MediaItem? = null
     private var subtitleFile: File? = null
+    private var initialPrepareStarted = false
+    private val progressScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var progressReporter: PlaybackProgressReporter? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -164,14 +170,42 @@ class PlayerActivity : ComponentActivity() {
         profile = savedProfile
         sessionId = id
         client = PinnedGatewayClient.forProfile(savedProfile)
-        val dataSourceFactory = DefaultDataSource.Factory(this, OkHttpDataSource.Factory(client!!.httpClient))
+        val progressClient = requireNotNull(client)
+        progressReporter = PlaybackProgressReporter(
+            scope = progressScope,
+            send = { update ->
+                progressClient.put(
+                    "/remote/v1/playback/$id/progress",
+                    JSONObject()
+                        .put("position_seconds", update.positionSeconds)
+                        .put("duration_seconds", update.durationSeconds)
+                        .put("update_sequence", update.sequence),
+                )
+            },
+            onResult = { update, error ->
+                if (BuildConfig.DEBUG) Log.d(
+                    "NetWatchProgress",
+                    "session=${id.take(8)} seq=${update.sequence} position=${update.positionSeconds.toLong()} duration=${update.durationSeconds.toLong()} result=${if (error == null) "ok" else "retry"}",
+                )
+            },
+        )
+        // A piece-gated Range request may legitimately wait for torrent pieces for up to
+        // four minutes. Keep normal API calls on their short timeout, but give only
+        // Media3's stream client enough time for distant resume/seek buffering.
+        val streamingHttpClient = client!!.httpClient.newBuilder()
+            .readTimeout(270, TimeUnit.SECONDS)
+            .build()
+        val dataSourceFactory = DefaultDataSource.Factory(this, OkHttpDataSource.Factory(streamingHttpClient))
+        val resumePositionMs = intent.getLongExtra(EXTRA_RESUME_POSITION_MS, 0L).coerceAtLeast(0L)
         player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(DefaultMediaSourceFactory(this).setDataSourceFactory(dataSourceFactory))
             .build().also { exoPlayer ->
                 mediaItem = buildMediaItem()
-                exoPlayer.setMediaItem(mediaItem!!)
+                exoPlayer.setMediaItem(mediaItem!!, resumePositionMs)
                 exoPlayer.playWhenReady = true
-                exoPlayer.prepare()
+                // Opening the stream before the gateway has selected the media file can
+                // race torrent metadata acquisition and surface a transient 404 as fatal.
+                // monitorStatus() starts Media3 only after the verified startup prefix is ready.
             }
 
         setContent {
@@ -189,6 +223,7 @@ class PlayerActivity : ComponentActivity() {
             }
         }
         monitorStatus()
+        monitorProgress()
     }
 
     @Composable
@@ -232,11 +267,23 @@ class PlayerActivity : ComponentActivity() {
         }
         DisposableEffect(player) {
             val listener = object : Player.Listener {
-                override fun onIsPlayingChanged(isPlaying: Boolean) { playing = isPlaying }
-                override fun onPlaybackStateChanged(state: Int) { playbackState = state }
+                override fun onIsPlayingChanged(isPlaying: Boolean) {
+                    playing = isPlaying
+                    if (!isPlaying) checkpointProgress()
+                }
+                override fun onPlaybackStateChanged(state: Int) {
+                    playbackState = state
+                    if (state == Player.STATE_ENDED) checkpointProgress()
+                }
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                    if (reason == Player.DISCONTINUITY_REASON_SEEK) checkpointProgress()
+                }
                 override fun onRenderedFirstFrame() { renderedFirstFrame = true }
                 override fun onTracksChanged(value: Tracks) { tracks = trackOptions(value) }
-                override fun onPlayerError(playerError: PlaybackException) { error = playerError.message ?: "Player unavailable" }
+                override fun onPlayerError(playerError: PlaybackException) {
+                    checkpointProgress()
+                    error = playerError.message ?: "Player unavailable"
+                }
             }
             player.addListener(listener)
             onDispose { player.removeListener(listener) }
@@ -289,7 +336,7 @@ class PlayerActivity : ComponentActivity() {
                     profile = profile,
                     network = network,
                     networkOpen = networkOpen,
-                    onNetwork = { networkOpen = !networkOpen },
+                    onNetwork = { networkOpen = !networkOpen; tracksOpen = false },
                     onBack = onBack,
                 )
             }
@@ -377,33 +424,67 @@ class PlayerActivity : ComponentActivity() {
         onNetwork: () -> Unit,
         onBack: () -> Unit,
     ) {
-        val progress = network.bufferProgress.takeIf { it > 0.0 && it < 100.0 }
         val pulse by rememberInfiniteTransition(label = "preparation").animateFloat(
-            initialValue = .38f, targetValue = 1f,
-            animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "brand pulse",
+            initialValue = .38f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+            label = "brand pulse",
         )
         val consumeClicks = remember { MutableInteractionSource() }
-        Box(Modifier.fillMaxSize().background(Color.Black).clickable(interactionSource = consumeClicks, indication = null) { if (networkOpen) onNetwork() }) {
+        Box(
+            Modifier.fillMaxSize().background(Color.Black).clickable(
+                interactionSource = consumeClicks,
+                indication = null,
+            ) { if (networkOpen) onNetwork() },
+        ) {
             GatewayArtwork(backdropPath, profile, Modifier.fillMaxSize(), ContentScale.Crop, showFallbackMark = false)
-            Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Black.copy(.48f), Color.Black.copy(.28f), Color.Black.copy(.72f)))))
-            PlayerIconButton(NetWatchPlayerIcons.Back, "Back to NetWatch", Modifier.align(Alignment.TopStart).padding(18.dp), onClick = onBack)
-            Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                Modifier.fillMaxSize().background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(.48f), Color.Black.copy(.28f), Color.Black.copy(.72f)),
+                    ),
+                ),
+            )
+            PlayerIconButton(
+                NetWatchPlayerIcons.Back,
+                "Back to NetWatch",
+                Modifier.align(Alignment.TopStart).padding(18.dp),
+                onClick = onBack,
+            )
+            Column(
+                Modifier.align(Alignment.Center).padding(horizontal = 48.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Image(
-                    painterResource(R.drawable.netwatch_icon), null,
-                    Modifier.size(92.dp).graphicsLayer { alpha = if (progress == null) pulse else .92f },
+                    painter = painterResource(R.drawable.netwatch_icon),
+                    contentDescription = null,
+                    modifier = Modifier.size(92.dp).graphicsLayer { alpha = pulse },
                 )
-                Text(title, Modifier.padding(top = 12.dp), color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(network.state.ifBlank { "Preparing" }, Modifier.padding(top = 5.dp), color = Color.White.copy(.55f), fontSize = 10.sp)
-                if (progress != null) {
-                    LinearProgressIndicator(
-                        progress = { (progress / 100.0).toFloat() },
-                        Modifier.padding(top = 14.dp).width(220.dp).height(3.dp).clip(CircleShape),
-                        color = Color(0xFF7B61FF), trackColor = Color.White.copy(.16f),
-                    )
-                }
+                Text(
+                    text = title,
+                    modifier = Modifier.padding(top = 12.dp),
+                    color = Color.White,
+                    fontSize = 14.5.sp,
+                    lineHeight = 17.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                )
             }
-            PlayerIconButton(NetWatchPlayerIcons.Download, "Connection", Modifier.align(Alignment.BottomEnd).padding(18.dp), onClick = onNetwork)
-            if (networkOpen) NetworkPopover(network, 0L, Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 66.dp))
+            PlayerIconButton(
+                NetWatchPlayerIcons.Download,
+                "Network",
+                Modifier.align(Alignment.BottomEnd).padding(18.dp),
+                onClick = onNetwork,
+            )
+            if (networkOpen) {
+                NetworkPopover(
+                    network = network,
+                    bufferedVideo = 0L,
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(end = 18.dp, bottom = 66.dp),
+                )
+            }
         }
     }
 
@@ -450,10 +531,11 @@ class PlayerActivity : ComponentActivity() {
         Surface(modifier.width(270.dp).clickable(interactionSource = consumeClicks, indication = null) {}, color = Color(0xF5101018), shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, Color.White.copy(.08f))) {
             Column(Modifier.padding(14.dp)) {
                 Text("Network", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                NetworkValue("State", network.state)
+                NetworkValue("Download speed", formatRate(network.downloadSpeedBps))
                 NetworkValue("Buffer", if (network.bufferProgress > 0) "${network.bufferProgress.toInt()}%" else "—")
-                NetworkValue("Peers", network.peers.toString())
-                if (bufferedVideo > 0) NetworkValue("Buffered video", formatTime(bufferedVideo))
+                NetworkValue("Connected peers", network.peers.toString())
+                if (bufferedVideo > 0) NetworkValue("Buffer ahead", formatTime(bufferedVideo))
+                NetworkValue("State", network.state)
             }
         }
     }
@@ -559,18 +641,50 @@ class PlayerActivity : ComponentActivity() {
                     networkState = PlayerNetworkState(
                         state = status.optString("message", status.optString("state", "Preparing")),
                         bufferProgress = status.optDouble("buffer_progress", 0.0).coerceIn(0.0, 100.0),
+                        downloadSpeedBps = status.optLong("download_speed_bps").coerceAtLeast(0L),
                         peers = status.optInt("connected_peers"),
                     )
+                    if (!initialPrepareStarted && status.optBoolean("ready", false)) {
+                        initialPrepareStarted = true
+                        player?.prepare()
+                    }
                 } catch (_: Exception) { networkState = networkState.copy(state = "Unavailable") }
                 delay(1_000)
             }
         }
     }
 
+    private fun progressSnapshot(): Pair<Double, Double>? {
+        val active = player ?: return null
+        val durationMs = active.duration
+        val positionMs = active.currentPosition
+        if (durationMs <= 0L || positionMs < 0L) return null
+        return positionMs.coerceAtMost(durationMs) / 1000.0 to durationMs / 1000.0
+    }
+
+    private fun checkpointProgress() {
+        val (position, duration) = progressSnapshot() ?: return
+        progressReporter?.submit(position, duration)
+    }
+
+    private fun monitorProgress() {
+        lifecycleScope.launch {
+            while (isActive) {
+                delay(15_000)
+                if (player?.isPlaying == true) checkpointProgress()
+            }
+        }
+    }
+
+    override fun onPause() {
+        checkpointProgress()
+        super.onPause()
+    }
+
     private fun loadEnglishSubtitle() {
         val gateway = client ?: return
         val id = sessionId ?: return
-        subtitleFeedback = "Finding subtitles…"
+        subtitleFeedback = null
         lifecycleScope.launch {
             try {
                 val subtitleAsset = withContext(Dispatchers.IO) {
@@ -623,6 +737,7 @@ class PlayerActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        val finalProgress = progressSnapshot()
         player?.release()
         player = null
         subtitleFile?.delete()
@@ -630,7 +745,16 @@ class PlayerActivity : ComponentActivity() {
         clearCachedSubtitles()
         val gateway = client
         val id = sessionId
-        if (isFinishing && gateway != null && id != null) CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { runCatching { gateway.delete("/remote/v1/playback/$id") } }
+        val reporter = progressReporter
+        progressReporter = null
+        if (isFinishing && gateway != null && id != null) CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            reporter?.close(finalProgress?.first, finalProgress?.second)
+            runCatching { gateway.delete("/remote/v1/playback/$id") }
+            progressScope.cancel()
+        } else {
+            reporter?.cancel()
+            progressScope.cancel()
+        }
         super.onDestroy()
     }
 
@@ -705,16 +829,29 @@ class PlayerActivity : ComponentActivity() {
         return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, rest) else "%d:%02d".format(minutes, rest)
     }
 
+    private fun formatRate(bytesPerSecond: Long): String {
+        if (bytesPerSecond <= 0L) return "0 B/s"
+        val value = bytesPerSecond.toDouble()
+        return when {
+            value >= 1024.0 * 1024.0 * 1024.0 -> "%.1f GB/s".format(value / (1024.0 * 1024.0 * 1024.0))
+            value >= 1024.0 * 1024.0 -> "%.1f MB/s".format(value / (1024.0 * 1024.0))
+            value >= 1024.0 -> "%.0f KB/s".format(value / 1024.0)
+            else -> "${bytesPerSecond} B/s"
+        }
+    }
+
     companion object {
         private const val SUBTITLE_PREFERENCES = "netwatch_subtitle_appearance"
         const val EXTRA_SESSION_ID = "playback_session_id"
         const val EXTRA_TITLE = "playback_title"
         const val EXTRA_BACKDROP_PATH = "playback_backdrop_path"
+        const val EXTRA_RESUME_POSITION_MS = "playback_resume_position_ms"
     }
 }
 
 private data class PlayerNetworkState(
     val state: String = "Preparing",
     val bufferProgress: Double = 0.0,
+    val downloadSpeedBps: Long = 0L,
     val peers: Int = 0,
 )

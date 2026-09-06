@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -64,6 +65,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -73,7 +75,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -82,6 +83,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -91,6 +94,9 @@ import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.mlkit.vision.common.InputImage
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.text.DateFormat
+import java.time.Instant
+import java.util.Date
 
 private val Ink = Color(0xFF08090C)
 private val Panel = Color(0xFF101116)
@@ -108,11 +114,15 @@ class MainActivity : ComponentActivity() {
         setContent {
             NetWatchTheme {
                 val model: MainViewModel = viewModel(factory = simpleViewModelFactory { MainViewModel(repository) })
+                val playerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+                    model.refreshAfterPlayer()
+                }
                 NetWatchApp(model) { _, session, title, backdropPath ->
-                    startActivity(Intent(this, PlayerActivity::class.java)
+                    playerLauncher.launch(Intent(this, PlayerActivity::class.java)
                         .putExtra(PlayerActivity.EXTRA_SESSION_ID, session.id)
                         .putExtra(PlayerActivity.EXTRA_TITLE, title)
-                        .putExtra(PlayerActivity.EXTRA_BACKDROP_PATH, backdropPath))
+                        .putExtra(PlayerActivity.EXTRA_BACKDROP_PATH, backdropPath)
+                        .putExtra(PlayerActivity.EXTRA_RESUME_POSITION_MS, session.resumePositionMs))
                 }
             }
         }
@@ -134,9 +144,9 @@ private fun NetWatchApp(model: MainViewModel, openPlayer: (GatewayProfile, Playb
             when {
                 state.profile == null -> PairingScreen(model::pair)
                 state.selected != null -> DetailsScreen(state, model, openPlayer)
-                else -> CatalogScreen(state, model)
+                else -> CatalogScreen(state, model, openPlayer)
             }
-            if (state.loading) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .28f)), contentAlignment = Alignment.Center) {
+            if (state.transitionLoading) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = .28f)), contentAlignment = Alignment.Center) {
                 CircularProgressIndicator(color = Accent, strokeWidth = 2.dp)
             }
             state.error?.let { message ->
@@ -195,10 +205,10 @@ private fun PairingScreen(onPair: (String) -> Unit) {
 }
 
 @Composable
-private fun CatalogScreen(state: MainUiState, model: MainViewModel) {
+private fun CatalogScreen(state: MainUiState, model: MainViewModel, openPlayer: (GatewayProfile, PlaybackSession, String, String?) -> Unit) {
     val profile = requireNotNull(state.profile)
     when (state.view) {
-        CatalogView.HOME -> HomeScreen(state, profile, model)
+        CatalogView.HOME -> HomeScreen(state, profile, model, openPlayer)
         CatalogView.DISCOVER -> DiscoverScreen(state, profile, model)
         CatalogView.SEARCH -> SearchScreen(state, profile, model)
         CatalogView.SETTINGS -> SettingsScreen(state, model)
@@ -218,11 +228,19 @@ private fun BrandHeader(subtitle: String? = null) {
 }
 
 @Composable
-private fun HomeScreen(state: MainUiState, profile: GatewayProfile, model: MainViewModel) {
+private fun HomeScreen(state: MainUiState, profile: GatewayProfile, model: MainViewModel, openPlayer: (GatewayProfile, PlaybackSession, String, String?) -> Unit) {
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 22.dp)) {
         item { BrandHeader() }
-        item { SearchField("Search movies, TV, anime…", "", { model.search(it) }) }
-        if (state.homeSections.isEmpty() && !state.loading) item { EmptyState("Catalog unavailable", "The PC did not return any titles.") }
+        item { SearchField("Search titles...", "", { model.search(it) }) }
+        if (state.homeSections.isEmpty() && state.keepWatching.isEmpty() && !state.loading) item { EmptyState("Catalog unavailable", "The PC did not return any titles.") }
+        if (state.keepWatching.isNotEmpty()) item {
+            Text("Keep Watching", Modifier.padding(start = 18.dp, top = 24.dp, bottom = 10.dp), color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            LazyRow(contentPadding = PaddingValues(horizontal = 18.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                items(state.keepWatching, key = { it.item.catalogId }) { entry ->
+                    KeepWatchingCard(entry, profile, Modifier.width(126.dp)) { model.resume(entry, openPlayer) }
+                }
+            }
+        }
         state.homeSections.forEach { section ->
             item {
                 Text(section.title, Modifier.padding(start = 18.dp, top = 24.dp, bottom = 10.dp), color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -239,7 +257,7 @@ private fun HomeScreen(state: MainUiState, profile: GatewayProfile, model: MainV
 private fun DiscoverScreen(state: MainUiState, profile: GatewayProfile, model: MainViewModel) {
     Column(Modifier.fillMaxSize()) {
         BrandHeader("Discover")
-        SearchField("Search movies, TV, anime…", "", { model.search(it) })
+        SearchField("Search titles...", "", { model.search(it) })
         BoxWithConstraints(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 18.dp)) {
             val gap = 8.dp
             val unit = (maxWidth - gap * 2) / 3.25f
@@ -249,25 +267,30 @@ private fun DiscoverScreen(state: MainUiState, profile: GatewayProfile, model: M
                     options = listOf("movies" to "Movies", "tv" to "TV", "anime" to "Anime"),
                     selected = state.discoverMedia,
                     width = unit,
-                ) { model.discover(it, state.discoverCategory, null) }
+                ) { model.discover(it, state.discoverCategory, null, showTransition = true) }
                 CompactSelect(
                     label = "Category",
                     options = listOf("popular" to "Popular", "new" to "New", "featured" to "Featured"),
                     selected = state.discoverCategory,
                     width = unit,
-                ) { model.discover(state.discoverMedia, it, state.discoverGenre) }
+                ) { model.discover(state.discoverMedia, it, state.discoverGenre, showTransition = true) }
                 CompactSelect(
                     label = "Genre",
                     options = listOf("top" to "Top") + state.discoverGenres.map { it.id.toString() to it.name },
                     selected = state.discoverGenre?.toString() ?: "top",
                     width = unit * 1.25f,
                 ) {
-                    model.discover(state.discoverMedia, state.discoverCategory, it.takeUnless { value -> value == "top" }?.toIntOrNull())
+                    model.discover(
+                        state.discoverMedia,
+                        state.discoverCategory,
+                        it.takeUnless { value -> value == "top" }?.toIntOrNull(),
+                        showTransition = true,
+                    )
                 }
             }
         }
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(if (state.loading) "Loading" else "${state.items.size} titles", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text("${state.items.size} titles", color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             val genreLabel = state.discoverGenres.firstOrNull { it.id == state.discoverGenre }?.name ?: "Top"
             Text("${state.discoverMedia.label()} · ${state.discoverCategory.replaceFirstChar(Char::uppercase)} · $genreLabel", color = TextMuted, fontSize = 10.sp)
         }
@@ -320,7 +343,7 @@ private fun CompactSelect(
 private fun SearchScreen(state: MainUiState, profile: GatewayProfile, model: MainViewModel) {
     Column(Modifier.fillMaxSize()) {
         BrandHeader("Search")
-        SearchField("Search movies, TV, anime…", state.searchQuery, model::search)
+        SearchField("Search titles...", state.searchQuery, model::search)
         if (state.searchQuery.isBlank()) EmptyState("Find something to watch", "Search movies, TV, and anime from your PC.")
         else {
             Text("${state.items.size} results", Modifier.padding(18.dp), color = TextPrimary, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
@@ -361,19 +384,6 @@ private fun SearchField(placeholder: String, initial: String, onSearch: (String)
 }
 
 @Composable
-private fun ChoiceRow(values: List<Pair<String, String>>, selected: String, onSelect: (String) -> Unit) {
-    LazyRow(contentPadding = PaddingValues(horizontal = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        items(values) { (value, label) ->
-            Surface(
-                modifier = Modifier.clickable { onSelect(value) },
-                color = if (value == selected) Accent.copy(alpha = .18f) else Panel,
-                shape = RoundedCornerShape(9.dp), border = androidx.compose.foundation.BorderStroke(1.dp, if (value == selected) Accent.copy(alpha = .6f) else Color.White.copy(alpha = .06f)),
-            ) { Text(label, Modifier.padding(horizontal = 14.dp, vertical = 9.dp), color = if (value == selected) Color(0xFFB7A9FF) else TextSecondary, fontSize = 11.sp) }
-        }
-    }
-}
-
-@Composable
 private fun CatalogGrid(items: List<CatalogItem>, profile: GatewayProfile, onSelect: (CatalogItem) -> Unit, modifier: Modifier = Modifier) {
     if (items.isEmpty()) { EmptyState("No titles in this selection", "Try another category or search."); return }
     LazyVerticalGrid(
@@ -399,8 +409,12 @@ private fun CatalogCard(item: CatalogItem, profile: GatewayProfile, modifier: Mo
 private fun DetailsScreen(state: MainUiState, model: MainViewModel, openPlayer: (GatewayProfile, PlaybackSession, String, String?) -> Unit) {
     val item = requireNotNull(state.selected)
     val profile = requireNotNull(state.profile)
+    val listState = rememberLazyListState()
+    val ranges = episodeRanges(state.episodes)
+    val rangeIndex = state.episodeRangeIndex.coerceIn(0, (ranges.size - 1).coerceAtLeast(0))
+    val visibleEpisodes = episodesInRange(state.episodes, rangeIndex)
     BackHandler(onBack = model::closeSelection)
-    LazyColumn(Modifier.fillMaxSize().background(Ink), contentPadding = PaddingValues(bottom = 32.dp)) {
+    LazyColumn(Modifier.fillMaxSize().background(Ink), state = listState, contentPadding = PaddingValues(bottom = 32.dp)) {
         item {
             Box(Modifier.fillMaxWidth().height(420.dp)) {
                 GatewayArtwork(item.backdropPath ?: item.artworkPath, profile, Modifier.fillMaxSize())
@@ -420,58 +434,111 @@ private fun DetailsScreen(state: MainUiState, model: MainViewModel, openPlayer: 
         item { item.overview?.let { Text(it, Modifier.padding(horizontal = 18.dp, vertical = 8.dp), color = TextSecondary, fontSize = 12.sp, lineHeight = 18.sp) } }
         if (item.isSeries) {
             item {
-                Text("SEASONS", Modifier.padding(start = 18.dp, top = 20.dp, bottom = 8.dp), color = TextMuted, fontSize = 9.sp)
-                LazyRow(contentPadding = PaddingValues(horizontal = 18.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    items(state.seasons, key = { it.number }) { season ->
-                        val selected = season.number == state.season
-                        Surface(Modifier.clickable { model.selectSeason(season.number) }, color = if (selected) Accent.copy(.18f) else Panel, shape = RoundedCornerShape(9.dp)) {
-                            Column(Modifier.padding(horizontal = 13.dp, vertical = 9.dp)) {
-                                Text(season.name, color = if (selected) Color(0xFFB7A9FF) else TextPrimary, fontSize = 11.sp)
-                                if (season.episodeCount > 0) Text("${season.episodeCount} episodes", color = TextMuted, fontSize = 8.sp)
-                            }
-                        }
+                BoxWithConstraints(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 20.dp, bottom = 10.dp)) {
+                    val gap = 10.dp
+                    val selectorWidth = if (ranges.size > 1) (maxWidth - gap) / 2 else maxWidth
+                    Row(horizontalArrangement = Arrangement.spacedBy(gap)) {
+                        CompactSelect(
+                            label = "Season",
+                            options = state.seasons.map { it.number.toString() to it.name },
+                            selected = state.season.toString(),
+                            width = selectorWidth,
+                        ) { it.toIntOrNull()?.let(model::selectSeason) }
+                        if (ranges.size > 1) CompactSelect(
+                            label = "Episodes",
+                            options = ranges.map { it.index.toString() to it.label },
+                            selected = rangeIndex.toString(),
+                            width = selectorWidth,
+                        ) { it.toIntOrNull()?.let(model::selectEpisodeRange) }
                     }
                 }
-                Text("EPISODES", Modifier.padding(start = 18.dp, top = 22.dp, bottom = 8.dp), color = TextMuted, fontSize = 9.sp)
+                Text("EPISODES", Modifier.padding(start = 18.dp, top = 6.dp, bottom = 8.dp), color = TextMuted, fontSize = 9.sp)
             }
-            items(state.episodes, key = { it.number }) { episode ->
-                EpisodeRow(episode, state.episode == episode.number, profile) { model.selectEpisode(episode.number) }
+            items(visibleEpisodes, key = { it.number }) { episode ->
+                EpisodeRow(episode, state.episode == episode.number) { model.selectEpisode(episode.number) }
             }
-        }
-        if (!item.isSeries || state.episode != null) {
+        } else {
             item {
-                val selectedEpisode = state.episodes.firstOrNull { it.number == state.episode }
                 Text("STREAMS", Modifier.padding(start = 18.dp, top = 24.dp, bottom = 4.dp), color = TextMuted, fontSize = 9.sp)
-                Text(
-                    if (state.loading) "Finding releases…" else "${state.options.size} options",
-                    Modifier.padding(horizontal = 18.dp, vertical = 4.dp), color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold,
-                )
-                if (selectedEpisode != null) Text("S${state.season.toString().padStart(2, '0')}E${selectedEpisode.number.toString().padStart(2, '0')} · ${selectedEpisode.name}", Modifier.padding(horizontal = 18.dp), color = TextMuted, fontSize = 10.sp)
+                if (!state.loading) Text("${state.options.size} options", Modifier.padding(horizontal = 18.dp, vertical = 4.dp), color = TextPrimary, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
             }
             if (state.options.isEmpty() && !state.loading) item { EmptyState("No streams found", "Try another episode or source.") }
             items(state.options, key = { it.releaseRef }) { option -> StreamRow(option) { model.start(option, openPlayer) } }
-        } else if (!state.loading) item { Text("Select an episode to find releases.", Modifier.padding(18.dp), color = TextMuted, fontSize = 11.sp) }
+        }
         item { Text("Metadata · TMDB", Modifier.fillMaxWidth().padding(top = 24.dp), color = TextMuted, fontSize = 9.sp) }
+    }
+    if (item.isSeries && state.releaseSheetOpen) {
+        ReleaseDialog(state, model, openPlayer)
     }
 }
 
 @Composable
-private fun EpisodeRow(episode: EpisodeChoice, selected: Boolean, profile: GatewayProfile, onSelect: () -> Unit) {
+private fun EpisodeRow(episode: EpisodeChoice, selected: Boolean, onSelect: () -> Unit) {
     Surface(
         Modifier.padding(horizontal = 18.dp, vertical = 4.dp).fillMaxWidth().clickable(onClick = onSelect),
         color = if (selected) Accent.copy(.10f) else Panel, shape = RoundedCornerShape(10.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, if (selected) Accent.copy(.45f) else Color.White.copy(.04f)),
     ) {
-        Row(Modifier.padding(9.dp), verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.width(104.dp).aspectRatio(16f / 9f).clip(RoundedCornerShape(7.dp)).background(PanelRaised)) { GatewayArtwork(episode.stillPath, profile, Modifier.fillMaxSize()) }
-            Spacer(Modifier.width(11.dp))
+        Row(Modifier.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text("E${episode.number.toString().padStart(2, '0')}  ${episode.name}", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text("E${episode.number.toString().padStart(2, '0')}  ${episode.name}", color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
                 val meta = listOfNotNull(episode.runtime?.let { "$it min" }, episode.rating.takeIf { it > 0 }?.let { "★ %.1f".format(it) }).joinToString(" · ")
                 if (meta.isNotBlank()) Text(meta, color = TextMuted, fontSize = 9.sp)
-                episode.overview?.let { Text(it, color = TextSecondary, fontSize = 9.sp, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             }
             Text("›", color = if (selected) Accent else TextMuted, fontSize = 22.sp)
+        }
+    }
+}
+
+@Composable
+private fun ReleaseDialog(state: MainUiState, model: MainViewModel, openPlayer: (GatewayProfile, PlaybackSession, String, String?) -> Unit) {
+    val selectedEpisode = state.episodes.firstOrNull { it.number == state.episode }
+    val sheetGeneration = state.releaseSheetGeneration
+    key(sheetGeneration) {
+        Dialog(
+            // Playback returns through a separate Activity. Back/outside dismissal
+            // events can arrive after the player window closes and must not tear
+            // down a newly opened release session. Use the explicit Close action.
+            onDismissRequest = {},
+            properties = DialogProperties(
+                dismissOnBackPress = false,
+                dismissOnClickOutside = false,
+            ),
+        ) {
+            Surface(
+                Modifier.fillMaxWidth().fillMaxHeight(.88f),
+                color = Ink,
+                shape = RoundedCornerShape(14.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = .09f)),
+            ) {
+                Column(Modifier.fillMaxSize()) {
+                    Row(Modifier.fillMaxWidth().padding(start = 18.dp, top = 16.dp, end = 8.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("STREAMS", color = TextMuted, fontSize = 9.sp)
+                            Text(
+                                "S${state.season.toString().padStart(2, '0')}E${(state.episode ?: 0).toString().padStart(2, '0')} · ${selectedEpisode?.name ?: "Episode"}",
+                                color = TextPrimary, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                        TextButton(onClick = { model.dismissReleaseSheet(sheetGeneration) }) { Text("Close", color = Accent) }
+                    }
+                    when {
+                        state.releaseLoading -> Spacer(Modifier.weight(1f))
+                        state.releaseError != null -> Column(
+                            Modifier.fillMaxWidth().weight(1f).padding(24.dp),
+                            verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(state.releaseError, color = TextSecondary, fontSize = 11.sp)
+                            Spacer(Modifier.height(10.dp))
+                            Button(onClick = model::retryReleaseSearch, colors = ButtonDefaults.buttonColors(containerColor = Accent)) { Text("Retry") }
+                        }
+                        state.options.isEmpty() -> EmptyState("No releases found", "Try again or choose another episode.")
+                        else -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 14.dp)) {
+                            items(state.options, key = { it.releaseRef }) { option -> StreamRow(option) { model.start(option, openPlayer) } }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -617,6 +684,27 @@ private fun QrScanner(modifier: Modifier, onQr: (String) -> Unit, onCancel: () -
             scanner = null
             executor.shutdownNow()
         }
+    }
+}
+
+@Composable
+private fun KeepWatchingCard(entry: KeepWatchingItem, profile: GatewayProfile, modifier: Modifier = Modifier, onSelect: () -> Unit) {
+    val episode = if (entry.season != null && entry.episode != null) {
+        "S${entry.season.toString().padStart(2, '0')}E${entry.episode.toString().padStart(2, '0')}"
+    } else null
+    val watched = runCatching {
+        DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date.from(Instant.parse(entry.updatedAt)))
+    }.getOrNull()
+    Column(modifier.clickable(onClick = onSelect)) {
+        Box(Modifier.fillMaxWidth().aspectRatio(2f / 3f).clip(RoundedCornerShape(9.dp)).background(PanelRaised)) {
+            GatewayArtwork(entry.item.artworkPath, profile, Modifier.fillMaxSize())
+            Text(entry.item.kindLabel, Modifier.align(Alignment.TopStart).padding(7.dp).background(Color.Black.copy(alpha = .72f), RoundedCornerShape(5.dp)).padding(horizontal = 6.dp, vertical = 3.dp), color = TextPrimary, fontSize = 8.sp)
+            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = .14f)))
+            Box(Modifier.align(Alignment.BottomStart).fillMaxWidth(entry.progress).height(3.dp).background(Accent))
+        }
+        Text(entry.item.title, Modifier.padding(top = 7.dp), color = TextPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(listOfNotNull(entry.item.year, entry.item.language?.uppercase()).joinToString(" · ").ifBlank { entry.item.kindLabel }, color = TextMuted, fontSize = 9.sp, maxLines = 1)
+        Text(listOfNotNull(episode, watched).joinToString(" · "), color = TextMuted, fontSize = 9.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

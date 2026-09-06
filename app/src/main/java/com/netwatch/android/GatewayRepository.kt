@@ -23,8 +23,16 @@ class GatewayRepository(private val vault: CredentialVault) {
             deviceId = response.getString("device_id"),
             credential = response.getString("device_credential"),
         )
-        PinnedGatewayClient.forProfile(profile).get("/remote/v1/status")
         vault.save(profile)
+        try {
+            PinnedGatewayClient.forProfile(profile).get("/remote/v1/status")
+        } catch (error: Exception) {
+            val revoked = runCatching {
+                PinnedGatewayClient.forProfile(profile).delete("/remote/v1/device/self")
+            }.isSuccess
+            if (revoked) vault.clear()
+            throw error
+        }
         profile
     }
 
@@ -34,6 +42,29 @@ class GatewayRepository(private val vault: CredentialVault) {
 
     suspend fun home(profile: GatewayProfile): List<HomeSection> = withContext(Dispatchers.IO) {
         parseHome(PinnedGatewayClient.forProfile(profile).get("/remote/v1/home"))
+    }
+
+    suspend fun keepWatching(profile: GatewayProfile): List<KeepWatchingItem> = withContext(Dispatchers.IO) {
+        val payload = PinnedGatewayClient.forProfile(profile).get("/remote/v1/keep-watching")
+        val values = payload.optJSONArray("items") ?: JSONArray()
+        buildList {
+            for (index in 0 until values.length()) {
+                values.optJSONObject(index)?.let(KeepWatchingItem::fromJson)?.let(::add)
+            }
+        }
+    }
+
+    suspend fun resumeKeepWatching(profile: GatewayProfile, entry: KeepWatchingItem): PlaybackSession = withContext(Dispatchers.IO) {
+        val response = PinnedGatewayClient.forProfile(profile).post(
+            "/remote/v1/keep-watching/${entry.item.catalogId}/playback",
+            JSONObject(),
+        )
+        PlaybackSession(
+            id = response.getString("session_id"),
+            resumePositionMs = (response.optDouble("resume_position_seconds", 0.0) * 1000.0).toLong().coerceAtLeast(0L),
+            title = response.optString("title").ifBlank { entry.item.title },
+            backdropPath = response.optString("backdrop_path").takeIf { it.startsWith("/remote/v1/artwork/") },
+        )
     }
 
     suspend fun discover(profile: GatewayProfile, media: String, category: String, genre: Int?): List<CatalogItem> = withContext(Dispatchers.IO) {
@@ -103,7 +134,7 @@ class GatewayRepository(private val vault: CredentialVault) {
         if (season != null) body.put("season", season)
         if (episode != null) body.put("episode", episode)
         val response = PinnedGatewayClient.forProfile(profile).post("/remote/v1/playback", body)
-        PlaybackSession(response.getString("session_id"), response.optString("state", "buffering"))
+        PlaybackSession(response.getString("session_id"))
     }
 
     suspend fun revokeAndClear(profile: GatewayProfile) = withContext(Dispatchers.IO) {

@@ -27,11 +27,13 @@ class PinnedGatewayClient private constructor(
     val credential: String?,
 ) {
     private val origin = "https://$host:$port"
-    val httpClient: OkHttpClient = buildHttpClient(host, spkiSha256, credential)
+    val httpClient: OkHttpClient = buildHttpClient(host, port, spkiSha256, credential)
 
     fun get(path: String): JSONObject = call("GET", path)
 
     fun post(path: String, body: JSONObject): JSONObject = call("POST", path, body)
+
+    fun put(path: String, body: JSONObject): JSONObject = call("PUT", path, body)
 
     fun delete(path: String): JSONObject = call("DELETE", path)
 
@@ -53,7 +55,7 @@ class PinnedGatewayClient private constructor(
     private fun call(method: String, path: String, body: JSONObject? = null): JSONObject {
         val request = Request.Builder()
             .url(absoluteUrl(path))
-            .method(method, body?.toString()?.toRequestBody(JSON) ?: if (method == "POST") EMPTY_BODY else null)
+            .method(method, body?.toString()?.toRequestBody(JSON) ?: if (method == "POST" || method == "PUT") EMPTY_BODY else null)
             .header("Accept", "application/json")
             .build()
         httpClient.newCall(request).execute().use { response ->
@@ -105,7 +107,7 @@ class PinnedGatewayClient private constructor(
         }
 
         @android.annotation.SuppressLint("CustomX509TrustManager")
-        private fun buildHttpClient(host: String, pin: String, credential: String?): OkHttpClient {
+        private fun buildHttpClient(host: String, port: Int, pin: String, credential: String?): OkHttpClient {
             val expectedPin = decodePin(pin)
             require(expectedPin.size == 32) { "Gateway fingerprint is invalid" }
             val trustManager = object : X509TrustManager {
@@ -126,7 +128,9 @@ class PinnedGatewayClient private constructor(
             }
             val auth = Interceptor { chain ->
                 val original = chain.request()
-                if (original.url.scheme != "https" || original.url.host != host) throw IOException("Gateway origin changed")
+                if (original.url.scheme != "https" || original.url.host != host || original.url.port != port) {
+                    throw IOException("Gateway origin changed")
+                }
                 val builder = original.newBuilder()
                 if (credential != null) builder.header("Authorization", "Bearer $credential")
                 chain.proceed(builder.build())

@@ -1,107 +1,60 @@
 # NetWatch Android
 
-NetWatch Android is a companion app for a paired NetWatch PC on the same local network.
+NetWatch Android is a LAN companion for NetWatch on Windows. Browse the PC catalog, select releases, and stream through the paired PC without running a torrent engine or VPN on the phone.
 
-The phone handles browsing and playback. The PC still handles discovery, torrent streaming, VPN routing, and subtitle providers.
+NetWatch for Windows 1.1.0 or newer is required. The Windows repository is authoritative for [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
 
-The Android app does **not** include:
+## Requirements
 
-* a torrent engine
-* provider API keys
-* a VPN
-* downloads or offline storage
-* arbitrary URL access
+- Android Studio with JDK 17
+- Android SDK API 37
+- Android Build Tools 36.0.0
+- A Windows PC running NetWatch on the same private network
 
-NetWatch for Windows **1.0.9 or newer** is required.
+## Build with Android Studio
 
-The desktop app defines the protocol used between both devices: [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
+1. Open this repository in Android Studio.
+2. Let Gradle synchronization finish and install any requested Android SDK components.
+3. Select the `app` run configuration and an Android device or emulator.
+4. Select **Run** to install a debug build, or **Build → Build APK(s)** to create an APK.
 
-## Build
+The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-Requirements:
+Release APKs must be signed with a private key that is kept outside this repository. Do not commit keystores, signing passwords, generated APKs, or local SDK configuration.
 
-* JDK 17
-* Android SDK with API 37
-* Android Build Tools 36.0.0
+## Command-line build
 
-The project uses:
-
-* Gradle 9.3.1
-* Android Gradle Plugin 9.1.1
-* Compose BOM 2026.08.00
-* Media3 1.11.0
-* CameraX 1.6.2
+With JDK 17 and the Android SDK configured:
 
 ```powershell
-$env:JAVA_HOME = "C:\path\to\jdk-17"
-$env:ANDROID_HOME = "C:\path\to\android-sdk"
-
-.\gradlew.bat testDebugUnitTest assembleDebug
-```
-
-The debug APK is created at:
-
-```text
-app/build/outputs/apk/debug/app-debug.apk
+.\gradlew.bat assembleDebug
 ```
 
 ## Pairing
 
 1. Start NetWatch on the PC and wait for it to become ready.
 2. Open **Settings → Remote access**.
-3. Choose the local network interface and enable remote access.
+3. Select the private network interface and enable remote access.
 4. Select **Pair new device**.
-5. On Android, select **Scan pairing QR** and allow camera access.
-6. Scan the QR shown on the PC.
+5. On Android, select **Scan pairing QR**, allow camera access, and scan the code.
 
-The pairing QR expires after five minutes and can only be used once.
-
-Once paired, you can browse Home, Discover, and Search, choose a release, and start playback from the phone.
-
-To remove access, use **Unpair this device** on Android or revoke the device from NetWatch Settings on the PC.
+Pairing codes expire after five minutes and can be used once. Re-pair after a PC address or identity change. Access can be removed from either Android Settings or the paired-device list on the PC.
 
 ## Playback
 
-The Android player follows the same general layout as the Windows player.
+The player supports audio and subtitle tracks, online subtitles supplied by the PC, subtitle appearance controls, seeking, and Fill, Fit, Original, and 16:9 resize modes. Keep Watching history remains on the PC and is shared with the Windows app.
 
-It includes:
+## Network and privacy
 
-* playback controls
-* subtitle and audio track selection
-* online subtitle support through the PC
-* subtitle size, background, and contrast settings
-* Fill, Fit, Original, and 16:9 resize modes
+- Connections are limited to the paired private IPv4 address and pinned HTTPS identity.
+- The PC remains responsible for metadata, release discovery, Prowlarr, torrent streaming, VPN routing, and subtitle providers.
+- Android stores no provider credentials, torrent engine, offline media, or independent viewing-history database.
+- The pairing profile is protected by Android Keystore and application backups are disabled.
+- Camera frames are processed on-device only while scanning a pairing QR.
+- The client does not accept arbitrary gateway or media URLs.
 
-Subtitle appearance settings are stored only on the Android device.
+Guest Wi-Fi or router client isolation can prevent the phone from reaching the PC.
 
-During startup or rebuffering, the player shows the title artwork instead of normal playback controls. Controls appear once video is ready.
+## Releases
 
-For TV shows, episodes remain visible while their streams are being prepared.
-
-## Network requirements
-
-The phone and PC must be on the same private local network.
-
-Connections may fail when:
-
-* the devices are on different networks
-* guest Wi-Fi isolates devices from each other
-* router client isolation is enabled
-* the PC's local IP address changes
-
-If the PC address changes, generate a new pairing QR.
-
-Re-pairing is also required if the PC identity is regenerated or the Android device's credential is revoked.
-
-## Privacy
-
-The app requests only:
-
-* **Internet** — connects to the paired NetWatch PC
-* **Camera** — scans the pairing QR locally
-
-QR camera frames are not saved or uploaded.
-
-Pairing information is encrypted using Android Keystore. Credentials are never placed in URLs or application logs.
-
-Android backups are disabled for the app.
+Android and Windows use independent version numbers. Each Android release states the minimum compatible Windows version. Public release APKs should be built from a clean tagged commit and signed outside the repository.
