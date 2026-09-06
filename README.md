@@ -2,7 +2,7 @@
 
 NetWatch Android is a LAN companion for NetWatch on Windows. Browse the PC catalog, select releases, and stream through the paired PC without running a torrent engine or VPN on the phone.
 
-NetWatch v1.1.0 for Windows or newer is required. The Windows repository is authoritative for [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
+NetWatch for Windows v1.1.0 or newer is required. The Windows repository is authoritative for [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
 
 ## Requirements
 
