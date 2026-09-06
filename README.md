@@ -20,8 +20,6 @@ NetWatch for Windows 1.1.0 or newer is required. The Windows repository is autho
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
-Release APKs must be signed with a private key that is kept outside this repository. Do not commit keystores, signing passwords, generated APKs, or local SDK configuration.
-
 ## Command-line build
 
 With JDK 17 and the Android SDK configured:
@@ -57,4 +55,4 @@ Guest Wi-Fi or router client isolation can prevent the phone from reaching the P
 
 ## Releases
 
-Android and Windows use independent version numbers. Each Android release states the minimum compatible Windows version. Public release APKs should be built from a clean tagged commit and signed outside the repository.
+Android and Windows use independent version numbers. Each Android release states the minimum compatible Windows version.
