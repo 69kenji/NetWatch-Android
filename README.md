@@ -2,7 +2,7 @@
 
 NetWatch Android is a LAN companion for NetWatch on Windows. Browse the PC catalog, select releases, and stream through the paired PC without running a torrent engine or VPN on the phone.
 
-NetWatch for Windows 1.1.0 or newer is required. The Windows repository is authoritative for [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
+NetWatch for Windows v1.1.0 or newer is required. The Windows repository is authoritative for [Remote Protocol v1](https://github.com/69kenji/netwatch/blob/main/remote-gateway/protocol/remote-v1.md).
 
 ## Requirements
 
@@ -19,8 +19,6 @@ NetWatch for Windows 1.1.0 or newer is required. The Windows repository is autho
 4. Select **Run** to install a debug build, or **Build → Build APK(s)** to create an APK.
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
-
-Release APKs must be signed with a private key that is kept outside this repository. Do not commit keystores, signing passwords, generated APKs, or local SDK configuration.
 
 ## Command-line build
 
@@ -57,4 +55,4 @@ Guest Wi-Fi or router client isolation can prevent the phone from reaching the P
 
 ## Releases
 
-Android and Windows use independent version numbers. Each Android release states the minimum compatible Windows version. Public release APKs should be built from a clean tagged commit and signed outside the repository.
+Android and Windows use independent version numbers. Each Android release states the minimum compatible Windows version.
