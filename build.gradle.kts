@@ -5,46 +5,18 @@ buildscript {
     }
 
     dependencies {
-        components {
-            withModule("org.apache.httpcomponents:httpmime") {
-                allVariants {
-                    withDependencies {
-                        removeAll {
-                            it.group == "org.apache.httpcomponents" && it.name == "httpclient"
-                        }
-                        add("org.apache.httpcomponents:httpclient:4.5.14")
-                    }
-                }
-            }
-            withModule("org.apache.commons:commons-compress") {
-                allVariants {
-                    withDependencies {
-                        removeAll {
-                            it.group == "org.apache.commons" && it.name == "commons-lang3"
-                        }
-                        add("org.apache.commons:commons-lang3:3.18.0")
-                    }
-                }
-            }
-            withModule("com.android.tools:sdk-common") {
-                allVariants {
-                    withDependencies {
-                        removeAll {
-                            it.group == "org.bouncycastle" && it.name in setOf(
-                                "bcpkix-jdk18on",
-                                "bcprov-jdk18on",
-                                "bcutil-jdk18on",
-                            )
-                        }
-                        add("org.bouncycastle:bcpkix-jdk18on:1.84")
-                        add("org.bouncycastle:bcprov-jdk18on:1.84")
-                        add("org.bouncycastle:bcutil-jdk18on:1.84")
-                    }
-                }
-            }
+        classpath("com.android.tools.build:gradle:9.4.0") {
+            exclude(group = "org.jdom", module = "jdom2")
+            exclude(group = "org.apache.httpcomponents", module = "httpclient")
+            exclude(group = "org.apache.commons", module = "commons-lang3")
+            exclude(group = "org.bitbucket.b_c", module = "jose4j")
+            exclude(group = "org.bouncycastle", module = "bcpkix-jdk18on")
+            exclude(group = "org.bouncycastle", module = "bcprov-jdk18on")
+            exclude(group = "org.bouncycastle", module = "bcutil-jdk18on")
+            exclude(group = "org.jetbrains.kotlin", module = "kotlin-gradle-plugin")
         }
 
-        // Keep AGP's build-only transitive dependencies on patched releases.
+        // Replace the excluded AGP build dependencies with patched releases.
         classpath("org.jdom:jdom2:2.0.6.1")
         classpath("org.apache.httpcomponents:httpclient:4.5.14")
         classpath("org.apache.commons:commons-lang3:3.18.0")
@@ -56,6 +28,5 @@ buildscript {
 }
 
 plugins {
-    id("com.android.application") version "9.4.0" apply false
-    id("org.jetbrains.kotlin.plugin.compose") version "2.3.21" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.4.20-RC3" apply false
 }
