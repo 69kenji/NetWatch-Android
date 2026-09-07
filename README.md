@@ -6,7 +6,7 @@ NetWatch for Windows 1.1.0 or newer is required. The Windows repository is autho
 
 ## Requirements
 
-- Android Studio with JDK 17
+- Android Studio 2026.1.4 or newer with JDK 17
 - Android SDK API 37
 - Android Build Tools 36.0.0
 - A Windows PC running NetWatch on the same private network
