@@ -1,4 +1,21 @@
 # NetWatch Android
+<p align="center">
+  <a href="https://github.com/69kenji/NetWatch-Android/releases/latest">
+    <img alt="Release" src="https://img.shields.io/github/v/release/69kenji/NetWatch-Android?style=flat-square&color=7c5cff">
+  </a>
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Android-3DDC84?style=flat-square&logo=android&logoColor=white">
+  <img alt="Minimum Android" src="https://img.shields.io/badge/minimum-Android%208.0-3DDC84?style=flat-square">
+  <img alt="Language" src="https://img.shields.io/badge/language-Kotlin-7F52FF?style=flat-square&logo=kotlin&logoColor=white">
+  <a href="https://github.com/69kenji/NetWatch-Android/blob/main/LICENSE">
+    <img alt="License" src="https://img.shields.io/github/license/69kenji/NetWatch-Android?style=flat-square">
+  </a>
+  <a href="https://github.com/69kenji/NetWatch-Android/issues">
+    <img alt="Issues" src="https://img.shields.io/github/issues/69kenji/NetWatch-Android?style=flat-square">
+  </a>
+  <a href="https://github.com/69kenji/NetWatch-Android/releases">
+    <img alt="Downloads" src="https://img.shields.io/github/downloads/69kenji/NetWatch-Android/total?style=flat-square">
+  </a>
+</p>
 
 NetWatch Android is a LAN companion for NetWatch on Windows. Browse the PC catalog, select releases, and stream through the paired PC without running a torrent engine or VPN on the phone.
 
